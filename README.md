@@ -272,7 +272,6 @@ Actual file sizes are measured and reported in `output/compaction_report.txt`.
 5. 128 MB file target is approximate — actual sizes depend on data volume per partition.
 
 ---
-
 ## Evaluation Checklist
 
 | Criterion | Status |
@@ -292,3 +291,65 @@ Actual file sizes are measured and reported in `output/compaction_report.txt`.
 | Reproducible synthetic data | Done — fixed seed |
 | Compaction with equivalence check | Done |
 | README + data dictionary | Done |
+
+
+-----
+## Benchmarking Results
+
+The pipeline includes two benchmarks to demonstrate partition pruning and small-file compaction using Hive-partitioned Parquet data.
+
+### 1. Partition Pruning Benchmark
+
+**Test configuration**
+- Dataset: `output/lake`
+- Filter: `year = 2024 AND month = 3`
+- Total files discovered: 90
+
+| Metric | Full Scan | Pruned Scan |
+|---|---:|---:|
+| Selected files | 90 | 30 |
+| Selected file size | 11.431 MB | 3.801 MB |
+| Returned rows | 72,443 | 24,061 |
+| Execution time | 0.0358 s | 0.0115 s |
+
+**Results**
+- Files eliminated by pruning: **66.7%**
+- The filtered result was verified as a subset of the full-scan result.
+- The pruned scan selected one-third of the files and approximately one-third of the data size.
+
+Execution times are from a local benchmark run and may vary with the environment, filesystem cache, and dataset size. The scans return different numbers of rows, so the timings should not be interpreted as a strict like-for-like performance comparison.
+
+The benchmark measures files selected using partition metadata; it does not directly measure the number of files physically read.
+
+### 2. Small-File Compaction Benchmark
+
+| Metric | Before | After |
+|---|---:|---:|
+| Files | 180 | 90 |
+| Total file size | 14.565 MB | 13.497 MB |
+| Rows | 87,045 | 87,045 |
+
+**Results**
+- File count reduced by **50%**.
+- Total file size reduced by approximately **7.3%**.
+- Data equivalence check: **PASS**.
+
+Compaction merges small files within partitions while preserving the data. The 128 MB target is a guideline rather than a guarantee; small partitions may naturally produce smaller files.
+
+### Reproducing the Benchmarks
+
+Generate data and run the pipeline before executing the pruning benchmark:
+
+```bash
+python -m generator.data_generator --rows 100000 --output sample_data/events_large.csv
+python run_pipeline.py --input sample_data/events_large.csv
+python pruning_demo.py
+```
+
+Run compaction separately:
+
+```bash
+python compaction.py
+```
+
+The reports are generated under `output/`. Benchmark results depend on the dataset and execution environment.
