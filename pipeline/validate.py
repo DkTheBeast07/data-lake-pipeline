@@ -112,7 +112,9 @@ def validate_records(
             continue
 
         batch_seen[eid] = payload_hash
-        good_rows.append(row.to_dict())
+        r = row.to_dict()
+        r["payload_hash"] = payload_hash  # carry forward so publish.py reuses the same hash
+        good_rows.append(r)
 
     base_cols = df.columns.tolist()
     good_df    = pd.DataFrame(good_rows)    if good_rows    else pd.DataFrame(columns=base_cols)

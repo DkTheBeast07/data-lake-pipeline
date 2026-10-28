@@ -29,7 +29,7 @@ def ingest(path: Path, run_id: str) -> tuple[pd.DataFrame, str]:
         raise FileNotFoundError(f"Input file not found: {path}")
 
     fingerprint = compute_fingerprint(path)
-    df = pd.read_csv(path, dtype=str)  # read all as str — validation handles types
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)  # read all as str; keep_default_na=False preserves blank cells as "" instead of NaN
 
     if df.empty:
         raise ValueError(f"Input file is empty: {path}")

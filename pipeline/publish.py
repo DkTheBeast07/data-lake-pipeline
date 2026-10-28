@@ -115,31 +115,69 @@ def _write_manifest(
     return path
 
 
+def _committed_run_ids() -> set[str]:
+    """Return run_ids that have a committed manifest — the source of truth."""
+    if not MANIFESTS_DIR.exists():
+        return set()
+    committed = set()
+    for p in MANIFESTS_DIR.glob("*.json"):
+        try:
+            data = json.loads(p.read_text())
+            if data.get("status") == "committed":
+                committed.add(data["run_id"])
+        except Exception:
+            pass
+    return committed
+
+
 def get_existing_event_ids() -> dict[str, str]:
     """
-    Scan the lake and return a dict of {event_id: payload_hash}.
-    Used by validate.py to detect cross-run duplicates and conflicts.
-    payload_hash is stored as a column in the Parquet files.
+    Scan only committed lake partitions and return {event_id: payload_hash}.
+    Uncommitted (orphaned) files are excluded — manifest is the source of truth.
+    Raises RuntimeError if the lake exists and is non-empty but the scan fails,
+    so the pipeline never proceeds with a blind empty lookup.
     """
     import pyarrow.dataset as ds
     if not LAKE_DIR.exists() or not any(LAKE_DIR.rglob("*.parquet")):
         return {}
 
-    dataset = ds.dataset(str(LAKE_DIR), format="parquet", partitioning="hive")
-    try:
-        table = dataset.to_table(columns=["event_id", "payload_hash"])
-        return dict(zip(table["event_id"].to_pylist(), table["payload_hash"].to_pylist()))
-    except Exception:
+    committed = _committed_run_ids()
+    if not committed:
         return {}
+
+    try:
+        dataset = ds.dataset(str(LAKE_DIR), format="parquet", partitioning="hive")
+        table = dataset.to_table(columns=["event_id", "payload_hash", "run_id"])
+        df = table.to_pandas()
+        df = df[df["run_id"].isin(committed)]
+        return dict(zip(df["event_id"], df["payload_hash"]))
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to load existing event_ids from lake — "
+            f"pipeline cannot safely proceed without duplicate history: {e}"
+        ) from e
 
 
 def get_total_published_rows() -> int:
-    """Count total rows currently in the lake across all partitions."""
+    """Count rows in committed lake partitions only.
+    Raises RuntimeError if the lake exists and is non-empty but the scan fails,
+    so the manifest and reconciliation report never record a silently wrong total.
+    """
     import pyarrow.dataset as ds
     if not LAKE_DIR.exists() or not any(LAKE_DIR.rglob("*.parquet")):
         return 0
-    dataset = ds.dataset(str(LAKE_DIR), format="parquet", partitioning="hive")
-    return dataset.count_rows()
+    committed = _committed_run_ids()
+    if not committed:
+        return 0
+    try:
+        dataset = ds.dataset(str(LAKE_DIR), format="parquet", partitioning="hive")
+        table = dataset.to_table(columns=["run_id"])
+        return int(table.to_pandas()["run_id"].isin(committed).sum())
+    except Exception as e:
+        raise RuntimeError(
+            f"Failed to count published rows from lake — "
+            f"pipeline cannot safely proceed with an incorrect total: {e}"
+        ) from e
 
 
 def publish(
@@ -155,19 +193,30 @@ def publish(
     Raises on staged validation failure — lake is never touched in that case.
     """
     if df.empty:
-        return {"newly_published_rows": 0, "partitions": []}
+        total_rows = get_total_published_rows()
+        _write_manifest(
+            run_id=run_id,
+            source_file=source_file,
+            source_fingerprint=source_fingerprint,
+            partitions=[],
+            newly_published_rows=0,
+            total_published_rows=total_rows,
+        )
+        return {"newly_published_rows": 0, "partitions": [], "total_published_rows": total_rows}
 
-    # Add payload_hash for future duplicate detection
-    import hashlib
-    PAYLOAD_COLS = ["order_id", "customer_id", "event_type",
-                    "event_timestamp", "product_id", "quantity", "unit_price", "region"]
-
-    def _phash(row):
-        raw = "|".join(str(row[c]) for c in PAYLOAD_COLS)
-        return hashlib.sha256(raw.encode()).hexdigest()
-
-    df = df.copy()
-    df["payload_hash"] = df.apply(_phash, axis=1)
+    # payload_hash was computed from raw strings in validate.py — reuse it directly
+    # so cross-run replay detection stays consistent with the stored hash.
+    if "payload_hash" not in df.columns:
+        import hashlib
+        PAYLOAD_COLS = ["order_id", "customer_id", "event_type",
+                        "event_timestamp", "product_id", "quantity", "unit_price", "region"]
+        df = df.copy()
+        df["payload_hash"] = df.apply(
+            lambda row: hashlib.sha256(
+                "|".join(str(row[c]) for c in PAYLOAD_COLS).encode()
+            ).hexdigest(),
+            axis=1,
+        )
 
     staging_base = STAGING_DIR / run_id
     staging_base.mkdir(parents=True, exist_ok=True)
@@ -190,7 +239,10 @@ def publish(
         # Clean up staging dir
         shutil.rmtree(staging_base, ignore_errors=True)
 
-        total_rows = get_total_published_rows()
+        # Total = all previously committed rows + this run's rows
+        # (manifest not yet written, so get_total_published_rows() would exclude this run)
+        prior_rows = get_total_published_rows()
+        total_rows = prior_rows + len(df)
 
         _write_manifest(
             run_id=run_id,
