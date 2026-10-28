@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# Output (generated at runtime — not committed except sample outputs)
+output/lake/
+output/staging/
+output/logs/
+output/manifests/
+output/rejects/
+output/reconciliation/
+
+# Keep the output folder itself
+!output/.gitkeep
+
+# Sample data (large generated files)
+sample_data/*.csv
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
